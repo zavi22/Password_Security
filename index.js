@@ -2,6 +2,9 @@ import express from "express";
 import bodyParser from "body-parser";
 import pg from "pg";
 import bcrypt from "bcrypt";
+import passport from "passport";
+import { Strategy } from "passport-local";
+import session from "express-session";
 import dotenv from "dotenv";
 dotenv.config();
 
@@ -19,6 +22,15 @@ const db = new pg.Client({
 
 db.connect();
 
+app.use(session({
+  secret: process.env.SESSION_SECRET,
+  resave: false,
+  saveUninitialized: true,
+}))
+
+app.use(passport.initialize());
+app.use(passport.session());
+
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(express.static("public"));
 
@@ -34,6 +46,14 @@ app.get("/register", (req, res) => {
   res.render("register.ejs");
 });
 
+app.get("/secrets", (req, res) => {
+  if (req.isAuthenticated()) {
+    res.render("secrets.ejs");
+  } else {
+    res.redirect("/login");
+  }
+})
+
 app.post("/register", async (req, res) => {
   const { username, password } = req.body;
 
@@ -46,8 +66,21 @@ app.post("/register", async (req, res) => {
         if (err) {
           res.status(500).send("An error occurred while hashing the password.");
         } else {
-          await db.query("INSERT INTO users (email, password) VALUES ($1, $2)", [username, hash]);
-          res.render("secrets.ejs");
+
+          // rather than res.render we are using passport things to register as well first we return the value
+          // in database and stored it in result than we created a variable and stored whatever comes from result
+          // on in passport library we have a method called req.login and it will log in the user and it takes 
+          // two parameters one is the user and another is a callback function if there is an error it will return 
+          // the error otherwise it will redirect to secrets page.
+          const result = await db.query("INSERT INTO users (email, password) VALUES ($1, $2) RETURNING *", [username, hash]);
+          const user = result.rows[0];
+          req.login(user, (err) => {
+            if (err) {
+              res.status(500).send("An error occurred while logging in.");
+            } else {
+              res.redirect("/secrets");
+            }
+          })
         }
       })
     }
@@ -56,8 +89,13 @@ app.post("/register", async (req, res) => {
   }
 });
 
-app.post("/login", async (req, res) => {
-  const { username, password } = req.body;
+// This will active the local strategy we wrote below and will handle the authentication process when a user tries to log in.
+app.post("/login", passport.authenticate("local", {
+  successRedirect: "/secrets",
+  failureRedirect: "/login"
+}));
+
+app.use(new Strategy(async function verify(username, password, cb) {
   try {
     const result = await db.query("SELECT * FROM users WHERE email = $1", [username]);
     if (result.rows.length > 0) {
@@ -66,21 +104,28 @@ app.post("/login", async (req, res) => {
 
       await bcrypt.compare(password, storedPassword, (err, result) => {
         if (err) {
-          res.status(500).send("An error occurred while comparing passwords.");
+          return cb(err);
         } else {
           if (result) {
-            res.render("secrets.ejs");
+            return cb(null, user);
           } else {
-            res.send("Incorrect password. Please try again.");
+            return cb(null, false);
           }
         }
       })
     } else {
-      res.send("User not found. Please register first.");
+      return cb(null, false);
     }
   } catch (error) {
     res.status(500).send("An error occurred during login. Please try again.");
   }
+}))
+
+passport.serializeUser((user, cb) => {
+  cb(null, user);
+});
+passport.deserializeUser((user, cb) => {
+  cb(null, user);
 });
 
 app.listen(port, () => {
